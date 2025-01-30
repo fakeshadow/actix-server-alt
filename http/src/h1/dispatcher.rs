@@ -236,7 +236,12 @@ where
             Ok(SelectOutput::A(Ok(_))) => {}
             Ok(SelectOutput::A(Err(_))) => return Err(Error::KeepAliveExpire),
             Ok(SelectOutput::B(Ok(()))) => {}
-            Ok(SelectOutput::B(Err(_))) => return Err(Error::KeepAliveExpire), // @TODO
+            Ok(SelectOutput::B(Err(e))) => {
+                tracing::warn!("alive watcher error: {}", e);
+
+                // remove watcher to prevent further error.
+                let _ = self.alive_watcher.take();
+            }
         }
 
         // we don't return early, because there may be some data in the buffer, or the watcher may have been triggered before the read.
