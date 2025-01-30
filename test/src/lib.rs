@@ -30,7 +30,10 @@ type HResponse<B> = Response<ResponseBody<B>>;
 
 /// A general test server for any given service type that accept the connection from
 /// xitca-server
-pub fn test_server<T, Req>(service: T) -> Result<TestServerHandle, Error>
+pub fn test_server<T, Req>(
+    service: T,
+    alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
+) -> Result<TestServerHandle, Error>
 where
     T: Service + Send + Sync + 'static,
     T::Response: ReadyService + Service<Req>,
@@ -40,12 +43,19 @@ where
 
     let addr = lst.local_addr()?;
 
-    let handle = Builder::new()
+    let builder = Builder::new()
         .worker_threads(1)
         .server_threads(1)
         .disable_signal()
-        .listen::<_, _, _, Req>("test_server", lst, service)
-        .build();
+        .listen::<_, _, _, Req>("test_server", lst, service);
+
+    let builder = if let Some(alive_watcher) = alive_watcher {
+        builder.watch_alive(alive_watcher)
+    } else {
+        builder
+    };
+
+    let handle = builder.build();
 
     Ok(TestServerHandle { addr, handle })
 }
@@ -60,15 +70,21 @@ where
     B: Stream<Item = Result<Bytes, E>> + 'static,
     E: fmt::Debug + 'static,
 {
+    let watcher = tokio::sync::watch::channel(true).0;
+
     #[cfg(not(feature = "io-uring"))]
     {
-        test_server::<_, (TcpStream, SocketAddr)>(service.enclosed(HttpServiceBuilder::h1()))
+        test_server::<_, (TcpStream, SocketAddr)>(
+            service.enclosed(HttpServiceBuilder::h1().watch_alive(watcher.clone())),
+            Some(watcher),
+        )
     }
 
     #[cfg(feature = "io-uring")]
     {
         test_server::<_, (xitca_io::net::io_uring::TcpStream, SocketAddr)>(
-            service.enclosed(HttpServiceBuilder::h1().io_uring()),
+            service.enclosed(HttpServiceBuilder::h1().io_uring().watch_alive(watcher.clone())),
+            Some(watcher),
         )
     }
 }
@@ -92,6 +108,7 @@ where
                     .keep_alive_timeout(Duration::from_millis(500)),
             ),
         ),
+        None,
     )
 }
 

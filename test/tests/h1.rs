@@ -34,7 +34,7 @@ async fn h1_get() -> Result<(), Error> {
         assert_eq!("GET Response", body);
     }
 
-    handle.try_handle()?.stop(false);
+    handle.try_handle()?.stop(true);
 
     handle.await?;
 

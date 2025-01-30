@@ -41,9 +41,19 @@ where
             .await
             .map_err(|_| HttpServiceError::Timeout(TimeoutError::TlsAccept))??;
 
-        super::dispatcher::run(&mut io, addr, timer, self.config, &self.service, self.date.get())
-            .await
-            .map_err(Into::into)
+        let watcher = self.alive_watcher.as_ref().map(|r| r.subscribe());
+
+        super::dispatcher::run(
+            &mut io,
+            addr,
+            timer,
+            self.config,
+            &self.service,
+            self.date.get(),
+            watcher,
+        )
+        .await
+        .map_err(Into::into)
     }
 }
 

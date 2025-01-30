@@ -25,6 +25,7 @@ pub struct HttpServer<
     service: Arc<S>,
     builder: Builder,
     config: HttpServiceConfig<HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>,
+    watch_alive: tokio::sync::watch::Sender<bool>,
 }
 
 impl<S> HttpServer<S>
@@ -36,6 +37,7 @@ where
             service: Arc::new(service),
             builder: Builder::new(),
             config: HttpServiceConfig::default(),
+            watch_alive: tokio::sync::watch::channel(true).0,
         }
     }
 }
@@ -179,7 +181,10 @@ where
         BE: fmt::Debug + 'static,
     {
         let config = self.config;
-        let service = self.service.clone().enclosed(HttpServiceBuilder::with_config(config));
+        let service = self
+            .service
+            .clone()
+            .enclosed(HttpServiceBuilder::with_config(config).watch_alive(self.watch_alive.clone()));
         self.builder = self.builder.bind("xitca-web", addr, service)?;
         Ok(self)
     }
@@ -195,7 +200,10 @@ where
         BE: fmt::Debug + 'static,
     {
         let config = self.config;
-        let service = self.service.clone().enclosed(HttpServiceBuilder::with_config(config));
+        let service = self
+            .service
+            .clone()
+            .enclosed(HttpServiceBuilder::with_config(config).watch_alive(self.watch_alive.clone()));
         self.builder = self.builder.listen("xitca-web", listener, service);
         Ok(self)
     }
@@ -246,10 +254,11 @@ where
 
         let acceptor = builder.build();
 
-        let service = self
-            .service
-            .clone()
-            .enclosed(HttpServiceBuilder::with_config(config).openssl(acceptor));
+        let service = self.service.clone().enclosed(
+            HttpServiceBuilder::with_config(config)
+                .watch_alive(self.watch_alive.clone())
+                .openssl(acceptor),
+        );
 
         self.builder = self.builder.bind("xitca-web-openssl", addr, service)?;
 
@@ -282,10 +291,11 @@ where
 
         let config = std::sync::Arc::new(config);
 
-        let service = self
-            .service
-            .clone()
-            .enclosed(HttpServiceBuilder::with_config(service_config).rustls(config));
+        let service = self.service.clone().enclosed(
+            HttpServiceBuilder::with_config(service_config)
+                .watch_alive(self.watch_alive.clone())
+                .rustls(config),
+        );
 
         self.builder = self.builder.bind("xitca-web-rustls", addr, service)?;
 
@@ -304,13 +314,16 @@ where
         BE: fmt::Debug + 'static,
     {
         let config = self.config;
-        let service = self.service.clone().enclosed(HttpServiceBuilder::with_config(config));
+        let service = self
+            .service
+            .clone()
+            .enclosed(HttpServiceBuilder::with_config(config).watch_alive(self.watch_alive.clone()));
         self.builder = self.builder.bind_unix("xitca-web", path, service)?;
         Ok(self)
     }
 
     pub fn run(self) -> ServerFuture {
-        self.builder.build()
+        self.builder.watch_alive(self.watch_alive).build()
     }
 
     fn mutate_const_generic<const HEADER_LIMIT2: usize, const READ_BUF_LIMIT2: usize, const WRITE_BUF_LIMIT2: usize>(
@@ -322,6 +335,7 @@ where
             config: self
                 .config
                 .mutate_const_generic::<HEADER_LIMIT2, READ_BUF_LIMIT2, WRITE_BUF_LIMIT2>(),
+            watch_alive: self.watch_alive,
         }
     }
 }

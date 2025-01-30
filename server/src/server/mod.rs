@@ -27,6 +27,7 @@ pub struct Server {
     tx_cmd: UnboundedSender<Command>,
     rx_cmd: UnboundedReceiver<Command>,
     rt: Option<Runtime>,
+    alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
     worker_join_handles: Vec<thread::JoinHandle<io::Result<()>>>,
 }
 
@@ -96,6 +97,7 @@ impl Server {
             factories,
             shutdown_timeout,
             on_worker_start,
+            alive_watcher,
             ..
         } = builder;
 
@@ -188,12 +190,18 @@ impl Server {
             rx_cmd,
             rt: Some(rt),
             worker_join_handles: vec![worker_handles],
+            alive_watcher,
         })
     }
 
     pub(crate) fn stop(&mut self, graceful: bool) {
         if let Some(rt) = self.rt.take() {
             self.is_graceful_shutdown.store(graceful, Ordering::SeqCst);
+
+            if let Some(watcher) = mem::take(&mut self.alive_watcher) {
+                let _ = watcher.send(false);
+            }
+
             rt.shutdown_background();
             mem::take(&mut self.worker_join_handles).into_iter().for_each(|handle| {
                 let _ = handle.join().unwrap();

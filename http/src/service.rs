@@ -31,6 +31,7 @@ pub struct HttpService<
     pub(crate) date: DateTimeService,
     pub(crate) service: S,
     pub(crate) tls_acceptor: A,
+    pub(crate) alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
     _body: PhantomData<(St, ReqB)>,
 }
 
@@ -41,12 +42,14 @@ impl<St, S, ReqB, A, const HEADER_LIMIT: usize, const READ_BUF_LIMIT: usize, con
         config: HttpServiceConfig<HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>,
         service: S,
         tls_acceptor: A,
+        alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
     ) -> Self {
         Self {
             config,
             date: DateTimeService::new(),
             service,
             tls_acceptor,
+            alive_watcher,
             _body: PhantomData,
         }
     }
@@ -87,6 +90,7 @@ where
         // tls accept timer.
         let timer = self.keep_alive();
         let mut timer = pin!(timer);
+        let alive_watcher = self.alive_watcher.as_ref().map(|r| r.subscribe());
 
         match io {
             #[cfg(feature = "http3")]
@@ -120,6 +124,7 @@ where
                         self.config,
                         &self.service,
                         self.date.get(),
+                        alive_watcher,
                     )
                     .await
                     .map_err(From::from),
@@ -168,6 +173,7 @@ where
                         self.config,
                         &self.service,
                         self.date.get(),
+                        alive_watcher,
                     )
                     .await
                     .map_err(From::from)

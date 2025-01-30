@@ -7,9 +7,10 @@ use core::{
     time::Duration,
 };
 
-use std::io;
-
 use futures_core::stream::Stream;
+use pin_project_lite::pin_project;
+use std::io;
+use std::task::Poll;
 use tracing::trace;
 use xitca_io::io::{AsyncIo, Interest, Ready};
 use xitca_service::Service;
@@ -63,6 +64,7 @@ pub(crate) async fn run<
     config: HttpServiceConfig<HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>,
     service: &'a S,
     date: &'a D,
+    alive_watcher: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<(), Error<S::Error, BE>>
 where
     S: Service<ExtRequest<ReqB>, Response = Response<ResB>>,
@@ -77,7 +79,7 @@ where
         EitherBuf::Right(WriteBuf::<WRITE_BUF_LIMIT>::default())
     };
 
-    Dispatcher::new(io, addr, timer, config, service, date, write_buf)
+    Dispatcher::new(io, addr, timer, config, service, date, write_buf, alive_watcher)
         .run()
         .await
 }
@@ -89,6 +91,7 @@ struct Dispatcher<'a, St, S, ReqB, W, D, const HEADER_LIMIT: usize, const READ_B
     ctx: Context<'a, D, HEADER_LIMIT>,
     service: &'a S,
     _phantom: PhantomData<ReqB>,
+    alive_watcher: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 // timer state is transformed in following order:
@@ -174,6 +177,7 @@ where
         service: &'a S,
         date: &'a D,
         write_buf: W,
+        alive_watcher: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Self {
         Self {
             io: BufferedIo::new(io, write_buf),
@@ -181,41 +185,62 @@ where
             ctx: Context::with_addr(addr, date),
             service,
             _phantom: PhantomData,
+            alive_watcher,
         }
     }
 
     async fn run(mut self) -> Result<(), Error<S::Error, BE>> {
         loop {
-            match self._run().await {
-                Ok(_) => {}
+            let shutdown = match self._run().await {
+                Ok(shutdown) => shutdown,
                 Err(Error::KeepAliveExpire) => {
                     trace!(target: "h1_dispatcher", "Connection keep-alive expired. Shutting down");
                     return Ok(());
                 }
-                Err(Error::RequestTimeout) => self.request_error(|| status_only(StatusCode::REQUEST_TIMEOUT)),
-                Err(Error::Proto(ProtoError::HeaderTooLarge)) => {
-                    self.request_error(|| status_only(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE))
+                Err(Error::RequestTimeout) => {
+                    self.request_error(|| status_only(StatusCode::REQUEST_TIMEOUT));
+
+                    false
                 }
-                Err(Error::Proto(_)) => self.request_error(|| status_only(StatusCode::BAD_REQUEST)),
+                Err(Error::Proto(ProtoError::HeaderTooLarge)) => {
+                    self.request_error(|| status_only(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE));
+
+                    false
+                }
+                Err(Error::Proto(_)) => {
+                    self.request_error(|| status_only(StatusCode::BAD_REQUEST));
+
+                    false
+                }
                 Err(e) => return Err(e),
-            }
+            };
 
             // TODO: add timeout for drain write?
             self.io.drain_write().await?;
 
-            if self.ctx.is_connection_closed() {
+            if shutdown || self.ctx.is_connection_closed() {
                 return self.io.shutdown().await.map_err(Into::into);
             }
         }
     }
 
-    async fn _run(&mut self) -> Result<(), Error<S::Error, BE>> {
+    async fn _run(&mut self) -> Result<bool, Error<S::Error, BE>> {
         self.timer.update(self.ctx.date().now());
-        self.io
-            .read()
-            .timeout(self.timer.get())
-            .await
-            .map_err(|_| self.timer.map_to_err())??;
+
+        let watcher_fut = OptionFuturePending {
+            fut: self.alive_watcher.as_mut().map(|r| r.changed()),
+        };
+
+        match self.io.read().select(watcher_fut).timeout(self.timer.get()).await {
+            Err(_) => return Err(self.timer.map_to_err()),
+            Ok(SelectOutput::A(Ok(_))) => {}
+            Ok(SelectOutput::A(Err(_))) => return Err(Error::KeepAliveExpire),
+            Ok(SelectOutput::B(Ok(()))) => {}
+            Ok(SelectOutput::B(Err(_))) => return Err(Error::KeepAliveExpire), // @TODO
+        }
+
+        // we don't return early, because there may be some data in the buffer, or the watcher may have been triggered before the read.
+        let shutdown = self.alive_watcher.as_ref().map(|r| !*r.borrow()).unwrap_or(false);
 
         while let Some((req, decoder)) = self.ctx.decode_head::<READ_BUF_LIMIT>(&mut self.io.read_buf)? {
             self.timer.reset_state();
@@ -270,7 +295,7 @@ where
             }
         }
 
-        Ok(())
+        Ok(shutdown)
     }
 
     fn encode_head(&mut self, parts: Parts, body: &impl Stream) -> Result<TransferCoding, ProtoError> {
@@ -385,4 +410,28 @@ impl BodyReader {
 #[inline(never)]
 pub(super) fn status_only(status: StatusCode) -> Response<NoneBody<Bytes>> {
     Response::builder().status(status).body(NoneBody::default()).unwrap()
+}
+
+pin_project! {
+    struct OptionFuturePending<F> {
+        #[pin]
+        fut: Option<F>,
+    }
+}
+
+impl<F> Default for OptionFuturePending<F> {
+    fn default() -> Self {
+        Self { fut: None }
+    }
+}
+
+impl<F: Future> Future for OptionFuturePending<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        match self.project().fut.as_pin_mut() {
+            Some(x) => x.poll(cx),
+            None => Poll::Pending,
+        }
+    }
 }
