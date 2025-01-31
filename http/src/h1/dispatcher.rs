@@ -8,9 +8,8 @@ use core::{
 };
 
 use futures_core::stream::Stream;
-use pin_project_lite::pin_project;
 use std::io;
-use std::task::Poll;
+use tokio_util::sync::CancellationToken;
 use tracing::trace;
 use xitca_io::io::{AsyncIo, Interest, Ready};
 use xitca_service::Service;
@@ -64,7 +63,7 @@ pub(crate) async fn run<
     config: HttpServiceConfig<HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>,
     service: &'a S,
     date: &'a D,
-    alive_watcher: Option<tokio::sync::watch::Receiver<bool>>,
+    cancellation_token: CancellationToken,
 ) -> Result<(), Error<S::Error, BE>>
 where
     S: Service<ExtRequest<ReqB>, Response = Response<ResB>>,
@@ -79,7 +78,7 @@ where
         EitherBuf::Right(WriteBuf::<WRITE_BUF_LIMIT>::default())
     };
 
-    Dispatcher::new(io, addr, timer, config, service, date, write_buf, alive_watcher)
+    Dispatcher::new(io, addr, timer, config, service, date, write_buf, cancellation_token)
         .run()
         .await
 }
@@ -91,7 +90,7 @@ struct Dispatcher<'a, St, S, ReqB, W, D, const HEADER_LIMIT: usize, const READ_B
     ctx: Context<'a, D, HEADER_LIMIT>,
     service: &'a S,
     _phantom: PhantomData<ReqB>,
-    alive_watcher: Option<tokio::sync::watch::Receiver<bool>>,
+    cancellation_token: CancellationToken,
 }
 
 // timer state is transformed in following order:
@@ -169,6 +168,7 @@ where
     W: H1BufWrite,
     D: DateTime,
 {
+    #[allow(clippy::too_many_arguments)]
     fn new<const WRITE_BUF_LIMIT: usize>(
         io: &'a mut St,
         addr: SocketAddr,
@@ -177,7 +177,7 @@ where
         service: &'a S,
         date: &'a D,
         write_buf: W,
-        alive_watcher: Option<tokio::sync::watch::Receiver<bool>>,
+        cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             io: BufferedIo::new(io, write_buf),
@@ -185,7 +185,7 @@ where
             ctx: Context::with_addr(addr, date),
             service,
             _phantom: PhantomData,
-            alive_watcher,
+            cancellation_token,
         }
     }
 
@@ -227,25 +227,22 @@ where
     async fn _run(&mut self) -> Result<bool, Error<S::Error, BE>> {
         self.timer.update(self.ctx.date().now());
 
-        let watcher_fut = OptionFuturePending {
-            fut: self.alive_watcher.as_mut().map(|r| r.changed()),
-        };
+        let mut cancelled = false;
 
-        match self.io.read().select(watcher_fut).timeout(self.timer.get()).await {
+        match self
+            .io
+            .read()
+            .select(self.cancellation_token.cancelled())
+            .timeout(self.timer.get())
+            .await
+        {
             Err(_) => return Err(self.timer.map_to_err()),
             Ok(SelectOutput::A(Ok(_))) => {}
             Ok(SelectOutput::A(Err(_))) => return Err(Error::KeepAliveExpire),
-            Ok(SelectOutput::B(Ok(()))) => {}
-            Ok(SelectOutput::B(Err(e))) => {
-                tracing::warn!("alive watcher error: {}", e);
-
-                // remove watcher to prevent further error.
-                let _ = self.alive_watcher.take();
+            Ok(SelectOutput::B(())) => {
+                cancelled = true;
             }
         }
-
-        // we don't return early, because there may be some data in the buffer, or the watcher may have been triggered before the read.
-        let shutdown = self.alive_watcher.as_ref().map(|r| !*r.borrow()).unwrap_or(false);
 
         while let Some((req, decoder)) = self.ctx.decode_head::<READ_BUF_LIMIT>(&mut self.io.read_buf)? {
             self.timer.reset_state();
@@ -300,7 +297,7 @@ where
             }
         }
 
-        Ok(shutdown)
+        Ok(cancelled)
     }
 
     fn encode_head(&mut self, parts: Parts, body: &impl Stream) -> Result<TransferCoding, ProtoError> {
@@ -415,28 +412,4 @@ impl BodyReader {
 #[inline(never)]
 pub(super) fn status_only(status: StatusCode) -> Response<NoneBody<Bytes>> {
     Response::builder().status(status).body(NoneBody::default()).unwrap()
-}
-
-pin_project! {
-    struct OptionFuturePending<F> {
-        #[pin]
-        fut: Option<F>,
-    }
-}
-
-impl<F> Default for OptionFuturePending<F> {
-    fn default() -> Self {
-        Self { fut: None }
-    }
-}
-
-impl<F: Future> Future for OptionFuturePending<F> {
-    type Output = F::Output;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        match self.project().fut.as_pin_mut() {
-            Some(x) => x.poll(cx),
-            None => Poll::Pending,
-        }
-    }
 }

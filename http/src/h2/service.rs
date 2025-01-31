@@ -1,6 +1,7 @@
 use core::{fmt, net::SocketAddr, pin::pin};
 
 use futures_core::Stream;
+use tokio_util::sync::CancellationToken;
 use xitca_io::io::{AsyncIo, PollIoAdapter};
 use xitca_service::Service;
 
@@ -27,7 +28,8 @@ impl<
         const HEADER_LIMIT: usize,
         const READ_BUF_LIMIT: usize,
         const WRITE_BUF_LIMIT: usize,
-    > Service<(St, SocketAddr)> for H2Service<St, S, A, HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>
+    > Service<((St, SocketAddr), CancellationToken)>
+    for H2Service<St, S, A, HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>
 where
     S: Service<Request<RequestExt<RequestBody>>, Response = Response<ResB>>,
     S::Error: fmt::Debug,
@@ -44,7 +46,10 @@ where
     type Response = ();
     type Error = HttpServiceError<S::Error, BE>;
 
-    async fn call(&self, (io, addr): (St, SocketAddr)) -> Result<Self::Response, Self::Error> {
+    async fn call(
+        &self,
+        ((io, addr), _): ((St, SocketAddr), CancellationToken),
+    ) -> Result<Self::Response, Self::Error> {
         // tls accept timer.
         let timer = self.keep_alive();
         let mut timer = pin!(timer);
@@ -86,6 +91,7 @@ pub(crate) use io_uring::H2UringService;
 
 #[cfg(feature = "io-uring")]
 mod io_uring {
+    use tokio_util::sync::CancellationToken;
     use {
         xitca_io::{
             io_uring::{AsyncBufRead, AsyncBufWrite},
@@ -133,7 +139,8 @@ mod io_uring {
     }
 
     impl<S, B, BE, A, const HEADER_LIMIT: usize, const READ_BUF_LIMIT: usize, const WRITE_BUF_LIMIT: usize>
-        Service<(TcpStream, SocketAddr)> for H2UringService<S, A, HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>
+        Service<((TcpStream, SocketAddr), CancellationToken)>
+        for H2UringService<S, A, HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>
     where
         S: Service<Request<RequestExt<crate::h2::proto::RequestBody>>, Response = Response<B>>,
         A: Service<TcpStream>,
@@ -146,7 +153,10 @@ mod io_uring {
     {
         type Response = ();
         type Error = HttpServiceError<S::Error, BE>;
-        async fn call(&self, (io, _): (TcpStream, SocketAddr)) -> Result<Self::Response, Self::Error> {
+        async fn call(
+            &self,
+            ((io, _), _): ((TcpStream, SocketAddr), CancellationToken),
+        ) -> Result<Self::Response, Self::Error> {
             let accept_dur = self.config.tls_accept_timeout;
             let deadline = self.date.get().now() + accept_dur;
             let mut timer = pin!(KeepAlive::new(deadline));

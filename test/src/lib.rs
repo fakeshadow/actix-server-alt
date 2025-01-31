@@ -10,6 +10,7 @@ use std::{
 };
 
 use futures_util::Stream;
+use tokio_util::sync::CancellationToken;
 use xitca_http::{
     body::ResponseBody,
     config::HttpServiceConfig,
@@ -30,32 +31,22 @@ type HResponse<B> = Response<ResponseBody<B>>;
 
 /// A general test server for any given service type that accept the connection from
 /// xitca-server
-pub fn test_server<T, Req>(
-    service: T,
-    alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
-) -> Result<TestServerHandle, Error>
+pub fn test_server<T, Req>(service: T) -> Result<TestServerHandle, Error>
 where
     T: Service + Send + Sync + 'static,
-    T::Response: ReadyService + Service<Req>,
+    T::Response: ReadyService + Service<(Req, CancellationToken)>,
     Req: TryFrom<NetStream> + 'static,
 {
     let lst = TcpListener::bind("127.0.0.1:0")?;
 
     let addr = lst.local_addr()?;
 
-    let builder = Builder::new()
+    let handle = Builder::new()
         .worker_threads(1)
         .server_threads(1)
         .disable_signal()
-        .listen::<_, _, _, Req>("test_server", lst, service);
-
-    let builder = if let Some(alive_watcher) = alive_watcher {
-        builder.watch_alive(alive_watcher)
-    } else {
-        builder
-    };
-
-    let handle = builder.build();
+        .listen::<_, _, _, Req>("test_server", lst, service)
+        .build();
 
     Ok(TestServerHandle { addr, handle })
 }
@@ -70,21 +61,15 @@ where
     B: Stream<Item = Result<Bytes, E>> + 'static,
     E: fmt::Debug + 'static,
 {
-    let watcher = tokio::sync::watch::channel(true).0;
-
     #[cfg(not(feature = "io-uring"))]
     {
-        test_server::<_, (TcpStream, SocketAddr)>(
-            service.enclosed(HttpServiceBuilder::h1().watch_alive(watcher.clone())),
-            Some(watcher),
-        )
+        test_server::<_, (TcpStream, SocketAddr)>(service.enclosed(HttpServiceBuilder::h1()))
     }
 
     #[cfg(feature = "io-uring")]
     {
         test_server::<_, (xitca_io::net::io_uring::TcpStream, SocketAddr)>(
-            service.enclosed(HttpServiceBuilder::h1().io_uring().watch_alive(watcher.clone())),
-            Some(watcher),
+            service.enclosed(HttpServiceBuilder::h1().io_uring()),
         )
     }
 }
@@ -108,7 +93,6 @@ where
                     .keep_alive_timeout(Duration::from_millis(500)),
             ),
         ),
-        None,
     )
 }
 

@@ -19,6 +19,7 @@ use tokio::{
     runtime::Runtime,
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{builder::Builder, worker};
 
@@ -27,7 +28,7 @@ pub struct Server {
     tx_cmd: UnboundedSender<Command>,
     rx_cmd: UnboundedReceiver<Command>,
     rt: Option<Runtime>,
-    alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
+    cancellation_token: CancellationToken,
     worker_join_handles: Vec<thread::JoinHandle<io::Result<()>>>,
 }
 
@@ -97,7 +98,6 @@ impl Server {
             factories,
             shutdown_timeout,
             on_worker_start,
-            alive_watcher,
             ..
         } = builder;
 
@@ -126,6 +126,8 @@ impl Server {
 
         let is_graceful_shutdown = Arc::new(AtomicBool::new(false));
         let is_graceful_shutdown2 = is_graceful_shutdown.clone();
+        let cancellation_token = CancellationToken::new();
+        let cancellation_token2 = cancellation_token.clone();
 
         let worker_handles = thread::Builder::new()
             .name(String::from("xitca-server-worker-shared-scope"))
@@ -145,7 +147,7 @@ impl Server {
                             let mut services = Vec::new();
 
                             for (name, factory) in factories.iter() {
-                                match factory.call((name, &listeners)).await {
+                                match factory.call((name, &listeners, cancellation_token2.clone())).await {
                                     Ok((h, s)) => {
                                         handles.extend(h);
                                         services.push(s);
@@ -190,17 +192,14 @@ impl Server {
             rx_cmd,
             rt: Some(rt),
             worker_join_handles: vec![worker_handles],
-            alive_watcher,
+            cancellation_token,
         })
     }
 
     pub(crate) fn stop(&mut self, graceful: bool) {
         if let Some(rt) = self.rt.take() {
             self.is_graceful_shutdown.store(graceful, Ordering::SeqCst);
-
-            if let Some(watcher) = mem::take(&mut self.alive_watcher) {
-                let _ = watcher.send(false);
-            }
+            self.cancellation_token.cancel();
 
             rt.shutdown_background();
             mem::take(&mut self.worker_join_handles).into_iter().for_each(|handle| {

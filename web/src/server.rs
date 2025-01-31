@@ -181,10 +181,7 @@ where
         BE: fmt::Debug + 'static,
     {
         let config = self.config;
-        let service = self
-            .service
-            .clone()
-            .enclosed(HttpServiceBuilder::with_config(config).watch_alive(self.watch_alive.clone()));
+        let service = self.service.clone().enclosed(HttpServiceBuilder::with_config(config));
         self.builder = self.builder.bind("xitca-web", addr, service)?;
         Ok(self)
     }
@@ -200,10 +197,7 @@ where
         BE: fmt::Debug + 'static,
     {
         let config = self.config;
-        let service = self
-            .service
-            .clone()
-            .enclosed(HttpServiceBuilder::with_config(config).watch_alive(self.watch_alive.clone()));
+        let service = self.service.clone().enclosed(HttpServiceBuilder::with_config(config));
         self.builder = self.builder.listen("xitca-web", listener, service);
         Ok(self)
     }
@@ -254,11 +248,10 @@ where
 
         let acceptor = builder.build();
 
-        let service = self.service.clone().enclosed(
-            HttpServiceBuilder::with_config(config)
-                .watch_alive(self.watch_alive.clone())
-                .openssl(acceptor),
-        );
+        let service = self
+            .service
+            .clone()
+            .enclosed(HttpServiceBuilder::with_config(config).openssl(acceptor));
 
         self.builder = self.builder.bind("xitca-web-openssl", addr, service)?;
 
@@ -291,11 +284,10 @@ where
 
         let config = std::sync::Arc::new(config);
 
-        let service = self.service.clone().enclosed(
-            HttpServiceBuilder::with_config(service_config)
-                .watch_alive(self.watch_alive.clone())
-                .rustls(config),
-        );
+        let service = self
+            .service
+            .clone()
+            .enclosed(HttpServiceBuilder::with_config(service_config).rustls(config));
 
         self.builder = self.builder.bind("xitca-web-rustls", addr, service)?;
 
@@ -314,10 +306,7 @@ where
         BE: fmt::Debug + 'static,
     {
         let config = self.config;
-        let service = self
-            .service
-            .clone()
-            .enclosed(HttpServiceBuilder::with_config(config).watch_alive(self.watch_alive.clone()));
+        let service = self.service.clone().enclosed(HttpServiceBuilder::with_config(config));
         self.builder = self.builder.bind_unix("xitca-web", path, service)?;
         Ok(self)
     }

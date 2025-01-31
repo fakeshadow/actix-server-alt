@@ -38,7 +38,6 @@ pub struct HttpServiceBuilder<
     pub(crate) tls_factory: FA,
     pub(crate) config: HttpServiceConfig<HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>,
     pub(crate) _body: PhantomData<fn(V, St)>,
-    pub(crate) alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl
@@ -71,7 +70,6 @@ impl
             tls_factory: tls::NoOpTlsAcceptorBuilder,
             config,
             _body: PhantomData,
-            alive_watcher: None,
         }
     }
 
@@ -89,7 +87,6 @@ impl
             tls_factory: tls::NoOpTlsAcceptorBuilder,
             config: HttpServiceConfig::default(),
             _body: PhantomData,
-            alive_watcher: None,
         }
     }
 
@@ -107,7 +104,6 @@ impl
             tls_factory: tls::NoOpTlsAcceptorBuilder,
             config: HttpServiceConfig::default(),
             _body: PhantomData,
-            alive_watcher: None,
         }
     }
 
@@ -130,20 +126,6 @@ impl<V, St, FA, const HEADER_LIMIT: usize, const READ_BUF_LIMIT: usize, const WR
             tls_factory: self.tls_factory,
             config,
             _body: PhantomData,
-            alive_watcher: self.alive_watcher,
-        }
-    }
-
-    /// construct a new service middleware with given [HttpServiceConfig].
-    pub fn watch_alive(
-        self,
-        alive_watcher: tokio::sync::watch::Sender<bool>,
-    ) -> HttpServiceBuilder<V, St, FA, HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT> {
-        HttpServiceBuilder {
-            tls_factory: self.tls_factory,
-            config: self.config,
-            _body: PhantomData,
-            alive_watcher: Some(alive_watcher),
         }
     }
 
@@ -156,7 +138,6 @@ impl<V, St, FA, const HEADER_LIMIT: usize, const READ_BUF_LIMIT: usize, const WR
             tls_factory,
             config: self.config,
             _body: PhantomData,
-            alive_watcher: self.alive_watcher,
         }
     }
 
@@ -217,11 +198,6 @@ where
     async fn call(&self, res: Result<S, E>) -> Result<Self::Response, Self::Error> {
         let service = res.map_err(|e| Box::new(e) as Error)?;
         let tls_acceptor = self.tls_factory.call(()).await.map_err(|e| Box::new(e) as Error)?;
-        Ok(HttpService::new(
-            self.config,
-            service,
-            tls_acceptor,
-            self.alive_watcher.clone(),
-        ))
+        Ok(HttpService::new(self.config, service, tls_acceptor))
     }
 }
