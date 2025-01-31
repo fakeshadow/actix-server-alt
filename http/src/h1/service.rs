@@ -117,7 +117,7 @@ where
     type Error = HttpServiceError<S::Error, BE>;
     async fn call(
         &self,
-        ((io, addr), _cancellation_token): ((TcpStream, SocketAddr), CancellationToken),
+        ((io, addr), cancellation_token): ((TcpStream, SocketAddr), CancellationToken),
     ) -> Result<Self::Response, Self::Error> {
         let accept_dur = self.config.tls_accept_timeout;
         let deadline = self.date.get().now() + accept_dur;
@@ -130,10 +130,18 @@ where
             .await
             .map_err(|_| HttpServiceError::Timeout(TimeoutError::TlsAccept))??;
 
-        super::dispatcher_uring::Dispatcher::new(io, addr, timer, self.config, &self.service, self.date.get())
-            .run()
-            .await
-            .map_err(Into::into)
+        super::dispatcher_uring::Dispatcher::new(
+            io,
+            addr,
+            timer,
+            self.config,
+            &self.service,
+            self.date.get(),
+            cancellation_token,
+        )
+        .run()
+        .await
+        .map_err(Into::into)
     }
 }
 

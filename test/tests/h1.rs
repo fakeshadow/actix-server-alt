@@ -243,6 +243,43 @@ async fn h1_keepalive() -> Result<(), Error> {
     Ok(())
 }
 
+#[tokio::test]
+async fn h1_shutdown_during_request() -> Result<(), Error> {
+    let mut handle = test_h1_server(fn_service(handle))?;
+
+    let mut stream = TcpStream::connect(handle.addr())?;
+
+    let mut buf = [0; 128];
+
+    // simulate writing req during shutdown.
+    let (req_buf_1, req_buf2) = SIMPLE_GET_REQ.split_at(SIMPLE_GET_REQ.len() / 2);
+
+    // write first half of the request.
+    stream.write_all(req_buf_1)?;
+
+    // shutdown server.
+    handle.try_handle()?.stop(true);
+
+    // sleep a bit to make sure event are processed.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // write second half of the request.
+    stream.write_all(req_buf2)?;
+
+    // read response.
+    loop {
+        let n = stream.read(&mut buf)?;
+
+        if buf[..n].ends_with(b"GET Response") {
+            break;
+        }
+    }
+
+    handle.await?;
+
+    Ok(())
+}
+
 async fn handle(req: Request<RequestExt<h1::RequestBody>>) -> Result<Response<ResponseBody>, Error> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/") | (&Method::HEAD, "/") => Ok(Response::new(Bytes::from("GET Response").into())),

@@ -191,43 +191,31 @@ where
 
     async fn run(mut self) -> Result<(), Error<S::Error, BE>> {
         loop {
-            let shutdown = match self._run().await {
-                Ok(shutdown) => shutdown,
+            match self._run().await {
+                Ok(_) => {}
                 Err(Error::KeepAliveExpire) => {
                     trace!(target: "h1_dispatcher", "Connection keep-alive expired. Shutting down");
                     return Ok(());
                 }
-                Err(Error::RequestTimeout) => {
-                    self.request_error(|| status_only(StatusCode::REQUEST_TIMEOUT));
-
-                    false
-                }
+                Err(Error::RequestTimeout) => self.request_error(|| status_only(StatusCode::REQUEST_TIMEOUT)),
                 Err(Error::Proto(ProtoError::HeaderTooLarge)) => {
-                    self.request_error(|| status_only(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE));
-
-                    false
+                    self.request_error(|| status_only(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE))
                 }
-                Err(Error::Proto(_)) => {
-                    self.request_error(|| status_only(StatusCode::BAD_REQUEST));
-
-                    false
-                }
+                Err(Error::Proto(_)) => self.request_error(|| status_only(StatusCode::BAD_REQUEST)),
                 Err(e) => return Err(e),
             };
 
             // TODO: add timeout for drain write?
             self.io.drain_write().await?;
 
-            if shutdown || self.ctx.is_connection_closed() {
+            if self.ctx.is_connection_closed() {
                 return self.io.shutdown().await.map_err(Into::into);
             }
         }
     }
 
-    async fn _run(&mut self) -> Result<bool, Error<S::Error, BE>> {
+    async fn _run(&mut self) -> Result<(), Error<S::Error, BE>> {
         self.timer.update(self.ctx.date().now());
-
-        let mut cancelled = false;
 
         match self
             .io
@@ -239,9 +227,7 @@ where
             Err(_) => return Err(self.timer.map_to_err()),
             Ok(SelectOutput::A(Ok(_))) => {}
             Ok(SelectOutput::A(Err(_))) => return Err(Error::KeepAliveExpire),
-            Ok(SelectOutput::B(())) => {
-                cancelled = true;
-            }
+            Ok(SelectOutput::B(())) => self.ctx.set_close(),
         }
 
         while let Some((req, decoder)) = self.ctx.decode_head::<READ_BUF_LIMIT>(&mut self.io.read_buf)? {
@@ -297,7 +283,7 @@ where
             }
         }
 
-        Ok(cancelled)
+        Ok(())
     }
 
     fn encode_head(&mut self, parts: Parts, body: &impl Stream) -> Result<TransferCoding, ProtoError> {
