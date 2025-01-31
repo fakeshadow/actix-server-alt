@@ -251,26 +251,35 @@ async fn h1_shutdown_during_request() -> Result<(), Error> {
 
     let mut buf = [0; 128];
 
-    // simulate writing req during shutdown.
-    let (req_buf_1, req_buf2) = SIMPLE_GET_REQ.split_at(SIMPLE_GET_REQ.len() / 2);
-
     // write first half of the request.
-    stream.write_all(req_buf_1)?;
+    stream.write_all(SLEEP_GET_REQ_PART_1)?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // shutdown server.
     handle.try_handle()?.stop(true);
-
-    // sleep a bit to make sure event are processed.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // write second half of the request.
-    stream.write_all(req_buf2)?;
+    stream.write_all(SLEEP_GET_REQ_PART_2)?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // write second half of the request.
+    stream.write_all(SLEEP_GET_REQ_PART_3)?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // read response.
     loop {
         let n = stream.read(&mut buf)?;
 
-        if buf[..n].ends_with(b"GET Response") {
+        if n == 0 {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected eof",
+            )))?;
+        }
+
+        // it should be chunked so it ends with 0\r\n\r\n
+        if buf[..n].ends_with(b"0\r\n\r\n") {
             break;
         }
     }
@@ -319,8 +328,17 @@ async fn handle(req: Request<RequestExt<h1::RequestBody>>) -> Result<Response<Re
             res.headers_mut().insert(CONNECTION, HeaderValue::from_static("close"));
             Ok(res)
         }
+        (&Method::GET, "/sleep") => {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            Ok(Response::new(ResponseBody::stream(BoxBody::new(req.into_body()))))
+        }
         _ => todo!(),
     }
 }
 
 const SIMPLE_GET_REQ: &[u8] = b"GET / HTTP/1.1\r\ncontent-length: 0\r\n\r\n";
+
+const SLEEP_GET_REQ_PART_1: &[u8] = b"GET /sleep HTTP/1.1\r\n";
+const SLEEP_GET_REQ_PART_2: &[u8] = b"content-length: 10\r\n\r\n01";
+const SLEEP_GET_REQ_PART_3: &[u8] = b"23456789";

@@ -147,6 +147,7 @@ where
                             self.config.keep_alive_timeout,
                             &self.service,
                             self.date.get(),
+                            cancellation_token,
                         )
                         .run()
                         .await

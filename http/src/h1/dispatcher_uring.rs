@@ -23,16 +23,6 @@ use xitca_io::{
 use xitca_service::Service;
 use xitca_unsafe_collection::futures::{Select, SelectOutput};
 
-use crate::{
-    body::NoneBody,
-    bytes::Bytes,
-    config::HttpServiceConfig,
-    date::DateTime,
-    h1::{body::RequestBody, error::Error},
-    http::{response::Response, StatusCode},
-    util::timer::{KeepAlive, Timeout},
-};
-
 use super::{
     dispatcher::{status_only, Timer},
     proto::{
@@ -41,6 +31,16 @@ use super::{
         encode::CONTINUE_BYTES,
         error::ProtoError,
     },
+};
+use crate::util::futures::WaitOrPending;
+use crate::{
+    body::NoneBody,
+    bytes::Bytes,
+    config::HttpServiceConfig,
+    date::DateTime,
+    h1::{body::RequestBody, error::Error},
+    http::{response::Response, StatusCode},
+    util::timer::{KeepAlive, Timeout},
 };
 
 type ExtRequest<B> = crate::http::Request<crate::http::RequestExt<B>>;
@@ -56,6 +56,7 @@ pub(super) struct Dispatcher<'a, Io, S, ReqB, D, const H_LIMIT: usize, const R_L
     notify: Notify<BufOwned>,
     _phantom: PhantomData<ReqB>,
     cancellation_token: CancellationToken,
+    request_guard: Rc<()>,
 }
 
 #[derive(Default)]
@@ -132,13 +133,14 @@ where
             notify: Notify::new(),
             _phantom: PhantomData,
             cancellation_token,
+            request_guard: Rc::new(()),
         }
     }
 
     pub(super) async fn run(mut self) -> Result<(), Error<S::Error, BE>> {
         loop {
             match self._run().await {
-                Ok(shutdown) => shutdown,
+                Ok(_) => {}
                 Err(Error::KeepAliveExpire) => {
                     trace!(target: "h1_dispatcher", "Connection keep-alive expired. Shutting down");
                     return Ok(());
@@ -156,6 +158,14 @@ where
             if self.ctx.is_connection_closed() {
                 return self.io.shutdown(Shutdown::Both).map_err(Into::into);
             }
+
+            // shutdown io if there is no more read buf
+            if self.read_buf.is_empty()
+                && self.cancellation_token.is_cancelled()
+                && Rc::strong_count(&self.request_guard) == 1
+            {
+                return self.io.shutdown(Shutdown::Both).map_err(Into::into);
+            }
         }
     }
 
@@ -165,26 +175,32 @@ where
         let read = match self
             .read_buf
             .read_io(&*self.io)
-            .select(self.cancellation_token.cancelled())
+            .select(WaitOrPending::new(
+                self.cancellation_token.cancelled(),
+                self.cancellation_token.is_cancelled(),
+            ))
             .timeout(self.timer.get())
             .await
         {
             Err(_) => return Err(self.timer.map_to_err()),
             Ok(SelectOutput::A(Ok(read))) => read,
             Ok(SelectOutput::A(Err(_))) => return Err(Error::KeepAliveExpire),
-            Ok(SelectOutput::B(())) => {
-                self.ctx.set_close();
-
-                return Ok(());
-            }
+            Ok(SelectOutput::B(())) => 0,
         };
 
         if read == 0 {
-            self.ctx.set_close();
+            if !self.cancellation_token.is_cancelled() {
+                println!("set close");
+                self.ctx.set_close();
+            } else {
+                println!("cancelled");
+            }
+
             return Ok(());
         }
 
         while let Some((req, decoder)) = self.ctx.decode_head::<R_LIMIT>(&mut self.read_buf)? {
+            println!("decode head");
             self.timer.reset_state();
 
             let (waiter, body) = if decoder.is_eof() {
@@ -204,6 +220,7 @@ where
 
             let req = req.map(|ext| ext.map_body(|_| ReqB::from(body)));
 
+            let _guard = self.request_guard.clone();
             let (parts, body) = self.service.call(req).await.map_err(Error::Service)?.into_parts();
 
             let mut encoder = self.ctx.encode_head(parts, &body, &mut *self.write_buf)?;

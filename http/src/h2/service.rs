@@ -48,7 +48,7 @@ where
 
     async fn call(
         &self,
-        ((io, addr), _): ((St, SocketAddr), CancellationToken),
+        ((io, addr), cancellation_token): ((St, SocketAddr), CancellationToken),
     ) -> Result<Self::Response, Self::Error> {
         // tls accept timer.
         let timer = self.keep_alive();
@@ -78,6 +78,7 @@ where
             self.config.keep_alive_timeout,
             &self.service,
             self.date.get(),
+            cancellation_token
         );
 
         dispatcher.run().await?;

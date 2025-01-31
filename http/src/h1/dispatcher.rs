@@ -8,7 +8,7 @@ use core::{
 };
 
 use futures_core::stream::Stream;
-use std::io;
+use std::{io, rc::Rc};
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
 use xitca_io::io::{AsyncIo, Interest, Ready};
@@ -41,6 +41,7 @@ use super::proto::{
     encode::CONTINUE,
     error::ProtoError,
 };
+use crate::util::futures::WaitOrPending;
 
 type ExtRequest<B> = crate::http::Request<crate::http::RequestExt<B>>;
 
@@ -91,6 +92,7 @@ struct Dispatcher<'a, St, S, ReqB, W, D, const HEADER_LIMIT: usize, const READ_B
     service: &'a S,
     _phantom: PhantomData<ReqB>,
     cancellation_token: CancellationToken,
+    request_guard: Rc<()>,
 }
 
 // timer state is transformed in following order:
@@ -186,6 +188,7 @@ where
             service,
             _phantom: PhantomData,
             cancellation_token,
+            request_guard: Rc::new(()),
         }
     }
 
@@ -208,7 +211,16 @@ where
             // TODO: add timeout for drain write?
             self.io.drain_write().await?;
 
+            // shutdown io if connection is closed.
             if self.ctx.is_connection_closed() {
+                return self.io.shutdown().await.map_err(Into::into);
+            }
+
+            // shutdown io if there is no more read buf
+            if self.io.read_buf.is_empty()
+                && self.cancellation_token.is_cancelled()
+                && Rc::strong_count(&self.request_guard) == 1
+            {
                 return self.io.shutdown().await.map_err(Into::into);
             }
         }
@@ -220,14 +232,17 @@ where
         match self
             .io
             .read()
-            .select(self.cancellation_token.cancelled())
+            .select(WaitOrPending::new(
+                self.cancellation_token.cancelled(),
+                self.cancellation_token.is_cancelled(),
+            ))
             .timeout(self.timer.get())
             .await
         {
             Err(_) => return Err(self.timer.map_to_err()),
             Ok(SelectOutput::A(Ok(_))) => {}
             Ok(SelectOutput::A(Err(_))) => return Err(Error::KeepAliveExpire),
-            Ok(SelectOutput::B(())) => self.ctx.set_close(),
+            Ok(SelectOutput::B(())) => {}
         }
 
         while let Some((req, decoder)) = self.ctx.decode_head::<READ_BUF_LIMIT>(&mut self.io.read_buf)? {
@@ -235,6 +250,7 @@ where
 
             let (mut body_reader, body) = BodyReader::from_coding(decoder);
             let req = req.map(|ext| ext.map_body(|_| ReqB::from(body)));
+            let _guard = self.request_guard.clone();
 
             let (parts, body) = match self
                 .service
