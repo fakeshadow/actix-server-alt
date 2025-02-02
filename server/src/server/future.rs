@@ -47,9 +47,11 @@ impl ServerFuture {
         match *self {
             Self::Init { ref server, .. } => Ok(ServerHandle {
                 tx: server.tx_cmd.clone(),
+                cancellation_token: server.cancellation_token.clone(),
             }),
             Self::Running(ref inner) => Ok(ServerHandle {
                 tx: inner.server.tx_cmd.clone(),
+                cancellation_token: inner.server.cancellation_token.clone(),
             }),
             Self::Error(_) => match mem::take(self) {
                 Self::Error(e) => Err(e),

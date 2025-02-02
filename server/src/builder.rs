@@ -21,6 +21,7 @@ pub struct Builder {
     pub(crate) enable_signal: bool,
     pub(crate) shutdown_timeout: Duration,
     pub(crate) on_worker_start: Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
+    pub(crate) alive_watcher: Option<tokio::sync::watch::Sender<bool>>,
     backlog: u32,
 }
 
@@ -42,6 +43,7 @@ impl Builder {
             enable_signal: true,
             shutdown_timeout: Duration::from_secs(30),
             on_worker_start: Box::new(|| Box::pin(async {})),
+            alive_watcher: None,
             backlog: 2048,
         }
     }
@@ -111,6 +113,11 @@ impl Builder {
 
     pub fn backlog(mut self, num: u32) -> Self {
         self.backlog = num;
+        self
+    }
+
+    pub fn watch_alive(mut self, watch_alive: tokio::sync::watch::Sender<bool>) -> Self {
+        self.alive_watcher = Some(watch_alive);
         self
     }
 

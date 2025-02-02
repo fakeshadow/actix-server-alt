@@ -27,7 +27,17 @@ async fn h2_get() -> Result<(), Error> {
         assert_eq!("GET Response", body);
     }
 
-    handle.try_handle()?.stop(false);
+    handle.try_handle()?.stop(true);
+
+    // let mut res = c.get(&server_url).version(Version::HTTP_2).send().await?;
+    // assert_eq!(res.status().as_u16(), 200);
+    // assert!(!res.can_close_connection());
+    // let body = res.string().await?;
+    // assert_eq!("GET Response", body);
+
+    let mut res = c.get(&server_url).version(Version::HTTP_2).send().await;
+
+    println!("{:?}", res.err().unwrap());
 
     handle.await?;
 
