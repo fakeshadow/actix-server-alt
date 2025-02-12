@@ -1,9 +1,8 @@
 use crate::{
-    body::BoxBody,
     error::{Error, InvalidUri},
     http::{
         header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, TRANSFER_ENCODING},
-        Method, StatusCode, Uri,
+        Method, Request, StatusCode, Uri,
     },
     response::Response,
     service::{Service, ServiceRequest},
@@ -20,31 +19,29 @@ impl<S> FollowRedirect<S> {
     }
 }
 
-impl<'r, 'c, S> Service<ServiceRequest<'r, 'c>> for FollowRedirect<S>
+impl<'c, S> Service<ServiceRequest<'c>> for FollowRedirect<S>
 where
-    S: for<'r2, 'c2> Service<ServiceRequest<'r2, 'c2>, Response = Response, Error = Error> + Send + Sync,
+    S: for<'c2> Service<ServiceRequest<'c2>, Response = Response, Error = Error> + Send + Sync,
 {
     type Response = Response;
     type Error = Error;
 
-    async fn call(&self, req: ServiceRequest<'r, 'c>) -> Result<Self::Response, Self::Error> {
+    async fn call(&self, req: ServiceRequest<'c>) -> Result<Self::Response, Self::Error> {
         let ServiceRequest { req, client, timeout } = req;
-        let mut headers = req.headers().clone();
-        let mut method = req.method().clone();
-        let mut uri = req.uri().clone();
-        let ext = req.extensions().clone();
+        let (mut head, mut body) = req.into_parts();
+
         loop {
+            let body = core::mem::take(&mut body);
+            let req = Request::from_parts(head.clone(), body);
             let mut res = self.service.call(ServiceRequest { req, client, timeout }).await?;
             match res.status() {
                 StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER => {
-                    if method != Method::HEAD {
-                        method = Method::GET;
+                    if head.method != Method::HEAD {
+                        head.method = Method::GET;
                     }
 
-                    *req.body_mut() = BoxBody::default();
-
                     for header in &[TRANSFER_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, CONTENT_LENGTH] {
-                        headers.remove(header);
+                        head.headers.remove(header);
                     }
                 }
                 StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT => {}
@@ -55,7 +52,7 @@ where
                 return Ok(res);
             };
 
-            let parts = uri.into_parts();
+            let parts = core::mem::take(&mut head.uri).into_parts();
 
             let parts_location = location
                 .to_str()
@@ -74,12 +71,7 @@ where
             }
 
             let path = parts_location.path_and_query.ok_or(InvalidUri::MissingPathQuery)?;
-            uri = uri_builder.path_and_query(path).build().unwrap();
-
-            *req.uri_mut() = uri.clone();
-            *req.method_mut() = method.clone();
-            *req.headers_mut() = headers.clone();
-            *req.extensions_mut() = ext.clone();
+            head.uri = uri_builder.path_and_query(path).build().unwrap();
         }
     }
 }
@@ -100,12 +92,12 @@ mod test {
 
         let redirect = FollowRedirect::new(service);
 
-        let mut req = http::Request::builder()
+        let req = http::Request::builder()
             .uri("http://foo.bar/foo")
             .body(Default::default())
             .unwrap();
 
-        let req = handle.mock(&mut req, |req| match req.uri().path() {
+        let req = handle.mock(req, |req| match req.uri().path() {
             "/foo" => Ok(http::Response::builder()
                 .status(StatusCode::SEE_OTHER)
                 .header("location", "/bar")
