@@ -5,7 +5,7 @@ use crate::{
     client::Client,
     connect::Connect,
     error::Error,
-    http::{Request, Version},
+    http::{HeaderName, Request, Version},
     pool::{exclusive, shared},
     response::Response,
     uri::Uri,
@@ -227,6 +227,9 @@ pub(crate) fn base_service() -> HttpService {
                                     Ok(Ok((res, buf, decoder, is_close))) => {
                                         if is_close {
                                             _conn.destroy_on_drop();
+                                        } else {
+                                            let (timeout, max) = parse_keep_alive(&res);
+                                            _conn.keep_alive_hint(timeout, max);
                                         }
                                         let body = crate::h1::body::ResponseBody::new(_conn, buf, decoder);
                                         let res = res.map(|_| crate::body::ResponseBody::H1(body));
@@ -263,11 +266,72 @@ pub(crate) fn base_service() -> HttpService {
     Box::new(HttpService)
 }
 
+const KEEP_ALIVE: HeaderName = HeaderName::from_static("keep-alive");
+
+fn parse_keep_alive<B>(res: &crate::http::Response<B>) -> (Option<Duration>, Option<usize>) {
+    let header = match res.headers().get(KEEP_ALIVE).map(|h| h.to_str()) {
+        Some(Ok(header)) => header,
+        _ => return (None, None),
+    };
+
+    let mut timeout = None;
+    let mut max = None;
+
+    for (key, value) in header.split(',').map(|item| {
+        let mut kv = item.splitn(2, '=');
+
+        (
+            kv.next().map(|s| s.trim()).unwrap_or_default(),
+            kv.next().map(|s| s.trim()).unwrap_or_default(),
+        )
+    }) {
+        match key.to_lowercase().as_str() {
+            "timeout" => {
+                timeout = value.parse::<u64>().ok().map(Duration::from_secs);
+            }
+            "max" => {
+                max = value.parse().ok();
+            }
+            _ => {}
+        }
+    }
+
+    (timeout, max)
+}
+
 #[cfg(test)]
 pub(crate) use test::mock_service;
 
 #[cfg(test)]
 mod test {
+    #[test]
+    fn test_parse_keep_alive() {
+        let mut res = http::Response::new(());
+        res.headers_mut()
+            .insert("keep-alive", "timeout=5, max=100".try_into().unwrap());
+
+        let (timeout, max) = super::parse_keep_alive(&res);
+
+        assert_eq!(timeout, Some(Duration::from_secs(5)));
+        assert_eq!(max, Some(100));
+
+        let mut res = http::Response::new(());
+        res.headers_mut().insert("keep-alive", "timeout=5".try_into().unwrap());
+
+        let (timeout, max) = super::parse_keep_alive(&res);
+
+        assert_eq!(timeout, Some(Duration::from_secs(5)));
+        assert_eq!(max, None);
+
+        let mut res = http::Response::new(());
+        res.headers_mut().insert("keep-alive", "max=5".try_into().unwrap());
+
+        let (timeout, max) = super::parse_keep_alive(&res);
+
+        assert_eq!(timeout, None);
+        assert_eq!(max, Some(5));
+    }
+
     use core::time::Duration;
 
     use std::sync::Arc;
