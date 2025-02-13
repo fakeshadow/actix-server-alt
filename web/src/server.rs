@@ -25,6 +25,7 @@ pub struct HttpServer<
     service: Arc<S>,
     builder: Builder,
     config: HttpServiceConfig<HEADER_LIMIT, READ_BUF_LIMIT, WRITE_BUF_LIMIT>,
+    watch_alive: tokio::sync::watch::Sender<bool>,
 }
 
 impl<S> HttpServer<S>
@@ -36,6 +37,7 @@ where
             service: Arc::new(service),
             builder: Builder::new(),
             config: HttpServiceConfig::default(),
+            watch_alive: tokio::sync::watch::channel(true).0,
         }
     }
 }
@@ -335,7 +337,7 @@ where
     }
 
     pub fn run(self) -> ServerFuture {
-        self.builder.build()
+        self.builder.watch_alive(self.watch_alive).build()
     }
 
     fn mutate_const_generic<const HEADER_LIMIT2: usize, const READ_BUF_LIMIT2: usize, const WRITE_BUF_LIMIT2: usize>(
@@ -347,6 +349,7 @@ where
             config: self
                 .config
                 .mutate_const_generic::<HEADER_LIMIT2, READ_BUF_LIMIT2, WRITE_BUF_LIMIT2>(),
+            watch_alive: self.watch_alive,
         }
     }
 }
